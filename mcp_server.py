@@ -16,6 +16,17 @@ from pydantic import BaseModel, Field
 import uuid
 from datetime import datetime
 
+# Import MCP SDK
+from mcp import (
+    MCPServer, 
+    MCPRequest, 
+    MCPResponse, 
+    MCPError, 
+    MCPCapability,
+    MCPAuthentication,
+    MCPModel
+)
+
 # Import our existing models and functions
 from beats_to_prose_solution import (
     StoryMetadata, ProseResponse, BeatsToProseRequest, 
@@ -34,7 +45,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # MCP Server implementation
-class MCPServer:
+class BeatsToProseMCPServer(MCPServer):
     """MCP Server implementation for Beats-to-Prose"""
     
     def __init__(self, config: Optional[ServerConfig] = None):
@@ -44,19 +55,16 @@ class MCPServer:
         # Set up logging
         logging.basicConfig(level=getattr(logging, self.config.log_level))
         
-        self.app = FastAPI(
-            title="Beats-to-Prose MCP Server",
+        # Initialize the MCP server
+        super().__init__(
+            name="beats-to-prose",
+            version="1.0.0",
             description="MCP Server for generating prose from story beats with advanced analysis",
-            version="1.0.0"
-        )
-        
-        # Add CORS middleware
-        self.app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],  # In production, replace with specific origins
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            protocol_version="1.0.0",
+            authentication=MCPAuthentication(
+                type="api_key",
+                required=True
+            )
         )
         
         # In-memory store for story generations
@@ -65,66 +73,86 @@ class MCPServer:
         # Initialize LEPOR evaluator if enabled
         self.lepor_evaluator = LEPOREvaluator() if self.config.enable_lepor else None
         
+        # Register capabilities
+        self._register_capabilities()
+        
         # Register routes
         self._register_routes()
+    
+    def _register_capabilities(self):
+        """Register MCP capabilities"""
+        
+        # Story generation capability
+        self.register_capability(
+            MCPCapability(
+                name="story_generation",
+                description="Generate prose from story beats",
+                enabled=True,
+                features=["prose_generation", "metadata_analysis", "text_analysis", "rag_enhancement"]
+            )
+        )
+        
+        # Text analysis capability
+        self.register_capability(
+            MCPCapability(
+                name="text_analysis",
+                description="Analyze text using available tools",
+                enabled=True,
+                features=["entity_extraction", "sentiment_analysis", "readability_analysis", "linguistic_features"]
+            )
+        )
+        
+        # RAG enhancement capability
+        self.register_capability(
+            MCPCapability(
+                name="rag_enhancement",
+                description="Enhance story generation with RAG",
+                enabled=self.config.enable_rag,
+                features=["similar_examples", "style_matching", "genre_matching"]
+            )
+        )
+        
+        # Style evaluation capability
+        self.register_capability(
+            MCPCapability(
+                name="style_evaluation",
+                description="Evaluate generated text against a style reference",
+                enabled=self.config.enable_lepor,
+                features=["lepor_evaluation", "style_feature_analysis", "style_comparison"]
+            )
+        )
+        
+        # LLM integration capability
+        self.register_capability(
+            MCPCapability(
+                name="llm_integration",
+                description="Integration with LLM providers",
+                enabled=True,
+                provider=self.config.llm.provider,
+                model=self.config.llm.model
+            )
+        )
     
     def _register_routes(self):
         """Register MCP routes"""
         
-        # MCP initialization endpoint
-        @self.app.post("/mcp/initialize")
-        async def initialize_mcp(request: Dict[str, Any]):
-            """Initialize MCP connection"""
-            logger.info("MCP initialization request received")
-            
-            # Extract client capabilities
-            client_capabilities = request.get("capabilities", {})
-            
-            # Define server capabilities
-            server_capabilities = {
-                "story_generation": {
-                    "enabled": True,
-                    "features": ["prose_generation", "metadata_analysis", "text_analysis", "rag_enhancement"]
-                },
-                "text_analysis": {
-                    "enabled": True,
-                    "features": ["entity_extraction", "sentiment_analysis", "readability_analysis", "linguistic_features"]
-                },
-                "rag_enhancement": {
-                    "enabled": self.config.enable_rag,
-                    "features": ["similar_examples", "style_matching", "genre_matching"]
-                },
-                "style_evaluation": {
-                    "enabled": self.config.enable_lepor,
-                    "features": ["lepor_evaluation", "style_feature_analysis", "style_comparison"]
-                },
-                "llm_integration": {
-                    "enabled": True,
-                    "provider": self.config.llm.provider,
-                    "model": self.config.llm.model
-                }
-            }
-            
-            return {
-                "status": "success",
-                "server_capabilities": server_capabilities,
-                "protocol_version": "1.0.0"
-            }
-        
         # MCP story generation endpoint
-        @self.app.post("/mcp/story/generate")
-        async def generate_story_mcp(request: Dict[str, Any], background_tasks: BackgroundTasks):
+        @self.route("/story/generate")
+        async def generate_story(request: MCPRequest) -> MCPResponse:
             """Generate a story from beats with optional metadata and analysis"""
             logger.info("MCP story generation request received")
             
             # Extract request parameters
-            beats = request.get("beats", [])
-            metadata = request.get("metadata", {})
-            options = request.get("options", {})
+            beats = request.data.get("beats", [])
+            metadata = request.data.get("metadata", {})
+            options = request.data.get("options", {})
             
             # Validate input
             if not beats or not isinstance(beats, list):
-                raise HTTPException(status_code=400, detail="Invalid beats input. Must be a non-empty list.")
+                return MCPError(
+                    code="INVALID_INPUT",
+                    message="Invalid beats input. Must be a non-empty list."
+                )
             
             # Create a new story ID and status
             story_id = str(uuid.uuid4())
@@ -178,7 +206,7 @@ class MCPServer:
             use_spacy = options.get("use_spacy", self.config.enable_spacy)
             
             # Start the background task
-            background_tasks.add_task(
+            asyncio.create_task(
                 self._generate_story_task, 
                 story_id, 
                 beats, 
@@ -187,30 +215,38 @@ class MCPServer:
                 use_spacy
             )
             
-            return status
+            return MCPResponse(data=status)
         
         # MCP story status endpoint
-        @self.app.get("/mcp/story/{story_id}")
-        async def get_story_status_mcp(story_id: str):
+        @self.route("/story/{story_id}")
+        async def get_story_status(request: MCPRequest) -> MCPResponse:
             """Get the status or result of a story generation"""
-            if story_id not in self.story_generations:
-                raise HTTPException(status_code=404, detail="Story not found")
+            story_id = request.params.get("story_id")
             
-            return self.story_generations[story_id]
+            if not story_id or story_id not in self.story_generations:
+                return MCPError(
+                    code="NOT_FOUND",
+                    message="Story not found"
+                )
+            
+            return MCPResponse(data=self.story_generations[story_id])
         
         # MCP text analysis endpoint
-        @self.app.post("/mcp/text/analyze")
-        async def analyze_text_mcp(request: Dict[str, Any]):
+        @self.route("/text/analyze")
+        async def analyze_text(request: MCPRequest) -> MCPResponse:
             """Analyze existing prose using available tools"""
             logger.info("MCP text analysis request received")
             
             # Extract request parameters
-            text = request.get("text", "")
-            options = request.get("options", {})
+            text = request.data.get("text", "")
+            options = request.data.get("options", {})
             
             # Validate input
             if not text:
-                raise HTTPException(status_code=400, detail="Invalid text input. Must be a non-empty string.")
+                return MCPError(
+                    code="INVALID_INPUT",
+                    message="Invalid text input. Must be a non-empty string."
+                )
             
             # Extract options
             use_spacy = options.get("use_spacy", self.config.enable_spacy)
@@ -238,28 +274,37 @@ class MCPServer:
                 if spacy_analysis:
                     analysis["spacy_analysis"] = spacy_analysis.dict()
             
-            return analysis
+            return MCPResponse(data=analysis)
         
         # MCP style evaluation endpoint
-        @self.app.post("/mcp/style/evaluate")
-        async def evaluate_style_mcp(request: Dict[str, Any]):
+        @self.route("/style/evaluate")
+        async def evaluate_style(request: MCPRequest) -> MCPResponse:
             """Evaluate generated text against a style reference using LEPOR"""
             logger.info("MCP style evaluation request received")
             
             # Check if LEPOR is enabled
             if not self.config.enable_lepor or not self.lepor_evaluator:
-                raise HTTPException(status_code=400, detail="LEPOR evaluation is not enabled")
+                return MCPError(
+                    code="FEATURE_DISABLED",
+                    message="LEPOR evaluation is not enabled"
+                )
             
             # Extract request parameters
-            generated_text = request.get("generated_text", "")
-            style_reference = request.get("style_reference", "")
-            options = request.get("options", {})
+            generated_text = request.data.get("generated_text", "")
+            style_reference = request.data.get("style_reference", "")
+            options = request.data.get("options", {})
             
             # Validate input
             if not generated_text:
-                raise HTTPException(status_code=400, detail="Invalid generated text. Must be a non-empty string.")
+                return MCPError(
+                    code="INVALID_INPUT",
+                    message="Invalid generated text. Must be a non-empty string."
+                )
             if not style_reference:
-                raise HTTPException(status_code=400, detail="Invalid style reference. Must be a non-empty string.")
+                return MCPError(
+                    code="INVALID_INPUT",
+                    message="Invalid style reference. Must be a non-empty string."
+                )
             
             # Extract options
             evaluation_type = options.get("evaluation_type", "comprehensive")
@@ -288,16 +333,13 @@ class MCPServer:
                         style_reference
                     )
                 
-                return result
+                return MCPResponse(data=result)
             except Exception as e:
                 logger.error(f"Error in style evaluation: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Error in style evaluation: {str(e)}")
-        
-        # MCP health check endpoint
-        @self.app.get("/mcp/health")
-        async def health_check_mcp():
-            """Health check endpoint"""
-            return {"status": "healthy"}
+                return MCPError(
+                    code="INTERNAL_ERROR",
+                    message=f"Error in style evaluation: {str(e)}"
+                )
     
     async def _generate_story_task(
         self, 
@@ -338,7 +380,7 @@ class MCPServer:
             self.story_generations[story_id]["completed_at"] = datetime.now().isoformat()
             logger.error(f"Error generating story: {str(e)}")
 
-def create_server(config_path: Optional[str] = None) -> MCPServer:
+def create_server(config_path: Optional[str] = None) -> BeatsToProseMCPServer:
     """
     Create an MCP server with the given configuration
     
@@ -346,10 +388,10 @@ def create_server(config_path: Optional[str] = None) -> MCPServer:
         config_path: Path to the configuration file
         
     Returns:
-        MCPServer instance
+        BeatsToProseMCPServer instance
     """
     config = load_config(config_path)
-    return MCPServer(config)
+    return BeatsToProseMCPServer(config)
 
 # Create MCP server instance
 mcp_server = create_server()
@@ -375,7 +417,7 @@ if __name__ == "__main__":
         config.port = args.port
     
     # Create server
-    server = MCPServer(config)
+    server = BeatsToProseMCPServer(config)
     
     # Run server
     import uvicorn

@@ -1,24 +1,23 @@
-# Beats-to-Prose MCP Server
+# Beats-to-Prose MCP
 
-A Model Context Protocol (MCP) server implementation for the Beats-to-Prose project, which converts story beats into prose using AI.
+A Model Context Protocol (MCP) server for converting story beats into prose using AI. This project implements the official Model Context Protocol specification for AI model integration.
 
 ## Features
 
 - RESTful API endpoints for story generation and text analysis
-- Asynchronous processing for long-running tasks
-- Status tracking for story generation
+- Asynchronous processing with status tracking
 - Text analysis capabilities using spaCy
 - LEPOR-based style evaluation
 - Configurable LLM provider integration
-- Health monitoring
 - Client implementation for easy integration
+- Official Model Context Protocol (MCP) compliance
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/beats-to-prose.git
-cd beats-to-prose
+git clone https://github.com/darthmanwe/Beats_MCP.git
+cd Beats_MCP
 ```
 
 2. Install dependencies:
@@ -27,47 +26,53 @@ pip install -r requirements.txt
 ```
 
 3. Set up environment variables:
-Create a `.env` file in the root directory with the following variables:
-```
-OPENAI_API_KEY=your_openai_api_key
-# Optional: For other LLM providers
-ANTHROPIC_API_KEY=your_anthropic_api_key
-COHERE_API_KEY=your_cohere_api_key
+```bash
+# Create a .env file
+cp .env.example .env
+
+# Edit the .env file with your API keys and configuration
 ```
 
 ## Configuration
 
-The MCP server can be configured using a JSON configuration file or environment variables.
+The server can be configured using a JSON configuration file or environment variables:
 
 ### Configuration File
 
-Create a `config.json` file in the root directory:
+Create a `config.json` file:
 
 ```json
 {
   "host": "0.0.0.0",
   "port": 8000,
+  "log_level": "INFO",
+  "enable_rag": false,
+  "enable_spacy": true,
+  "enable_lepor": true,
   "llm": {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-3.5-turbo",
     "api_key": "your_api_key",
     "temperature": 0.7,
     "max_tokens": 4000
-  },
-  "enable_rag": true,
-  "enable_spacy": true,
-  "enable_lepor": true,
-  "log_level": "INFO"
+  }
 }
 ```
 
 ### Environment Variables
 
-You can also configure the server using environment variables:
-
-```
+```bash
+# Server settings
 MCP_HOST=0.0.0.0
 MCP_PORT=8000
+MCP_LOG_LEVEL=INFO
+
+# Feature toggles
+MCP_ENABLE_RAG=true
+MCP_ENABLE_SPACY=true
+MCP_ENABLE_LEPOR=true
+
+# LLM settings
 MCP_LLM_PROVIDER=openai
 MCP_LLM_MODEL=gpt-4
 MCP_LLM_API_KEY=your_api_key
@@ -83,34 +88,33 @@ MCP_LOG_LEVEL=INFO
 
 ### Starting the Server
 
-Basic usage:
 ```bash
+# Using default configuration
 python mcp_server.py
-```
 
-With configuration file:
-```bash
+# Using a configuration file
 python mcp_server.py --config config.json
-```
 
-With command-line overrides:
-```bash
-python mcp_server.py --config config.json --host 127.0.0.1 --port 8080
+# Using command line arguments
+python mcp_server.py --host 0.0.0.0 --port 8000
 ```
-
-The server will start on the specified host and port.
 
 ### Using the Client
 
 ```python
-from mcp_client import MCPClient
+import asyncio
+from mcp_client import BeatsToProseMCPClient
 
 async def main():
-    # Initialize client
-    client = MCPClient()
+    # Initialize client with API key
+    client = BeatsToProseMCPClient(
+        server_url="http://localhost:8000",
+        api_key="your_api_key"
+    )
     
     # Connect to server
-    await client.connect()
+    capabilities = await client.connect()
+    print(f"Connected to server with capabilities: {capabilities}")
     
     # Generate a story
     beats = [
@@ -124,12 +128,27 @@ async def main():
         "tone": "adventurous"
     }
     
-    # Start story generation
-    story_id = await client.generate_story(beats, metadata)
+    # Define status callback
+    async def status_callback(status):
+        print(f"Story status: {status.get('status')}, Progress: {status.get('progress', 0)}")
     
-    # Check status
-    status = await client.get_story_status(story_id)
-    print(f"Story status: {status}")
+    # Start story generation
+    story_id = await client.generate_story(beats, metadata, callback=status_callback)
+    print(f"Started story generation with ID: {story_id}")
+    
+    # Wait for generation to complete
+    while True:
+        status = await client.get_story_status(story_id)
+        if status.get("status") in ["completed", "failed"]:
+            break
+        await asyncio.sleep(1)
+    
+    # Check result
+    if status.get("status") == "completed":
+        result = status.get("result", {})
+        print(f"Story generated successfully: {result.get('prose', '')[:100]}...")
+    else:
+        print(f"Story generation failed: {status.get('error')}")
     
     # Analyze text
     analysis = await client.analyze_text("The young wizard cast a spell.")
@@ -138,50 +157,26 @@ async def main():
     # Evaluate style
     style_reference = "The old wizard's eyes twinkled with ancient wisdom."
     evaluation = await client.evaluate_style(
-        "The young wizard'\''s eyes sparkled with newfound power.",
+        "The young wizard's eyes sparkled with newfound power.",
         style_reference
     )
     print(f"Style evaluation: {evaluation}")
-    
-    # Close connection
-    await client.close()
 
 # Run the example
-import asyncio
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ## API Endpoints
 
-### MCP Endpoints
+The server implements the following MCP endpoints:
 
-- `POST /mcp/initialize`: Initialize MCP connection
-- `POST /mcp/story/generate`: Generate a story from beats
-- `GET /mcp/story/{story_id}`: Get story generation status
-- `POST /mcp/text/analyze`: Analyze text using available tools
-- `POST /mcp/style/evaluate`: Evaluate generated text against a style reference
-- `GET /mcp/health`: Check server health
+### Story Generation
 
-### Example API Requests
-
-#### Initialize MCP Connection
-
-```bash
-curl -X POST http://localhost:8000/mcp/initialize \
-  -H "Content-Type: application/json" \
-  -d '{"capabilities": {"story_generation": true}}'
-```
-
-#### Generate a Story
-
-```bash
-curl -X POST http://localhost:8000/mcp/story/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "beats": [
-      "A young wizard discovers his magical powers",
-      "He must face a dark wizard who threatens his school"
-    ],
+- `POST /story/generate` - Generate a story from beats
+  ```json
+  {
+    "beats": ["beat1", "beat2", ...],
     "metadata": {
       "genre": "fantasy",
       "target_audience": "young adult",
@@ -191,60 +186,58 @@ curl -X POST http://localhost:8000/mcp/story/generate \
       "use_rag": true,
       "use_spacy": true
     }
-  }'
-```
+  }
+  ```
 
-#### Check Story Status
+- `GET /story/{story_id}` - Get story generation status
 
-```bash
-curl -X GET http://localhost:8000/mcp/story/123e4567-e89b-12d3-a456-426614174000
-```
+### Text Analysis
 
-#### Analyze Text
-
-```bash
-curl -X POST http://localhost:8000/mcp/text/analyze \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "The young wizard cast a spell.",
+- `POST /text/analyze` - Analyze text
+  ```json
+  {
+    "text": "Text to analyze",
     "options": {
       "use_spacy": true
     }
-  }'
-```
+  }
+  ```
 
-#### Evaluate Style
+### Style Evaluation
 
-```bash
-curl -X POST http://localhost:8000/mcp/style/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "generated_text": "The young wizard'\''s eyes sparkled with newfound power.",
-    "style_reference": "The old wizard'\''s eyes twinkled with ancient wisdom.",
+- `POST /style/evaluate` - Evaluate text against a style reference
+  ```json
+  {
+    "generated_text": "Text to evaluate",
+    "style_reference": "Reference style text",
     "options": {
       "evaluation_type": "comprehensive"
     }
-  }'
-```
+  }
+  ```
+
+## MCP Protocol
+
+This implementation follows the official Model Context Protocol specification:
+
+- **Initialization**: The client and server exchange capabilities during initialization
+- **Authentication**: API key-based authentication is supported
+- **Standardized Endpoints**: All endpoints follow the MCP specification
+- **Error Handling**: Standardized error responses using MCP error codes
+- **Response Format**: All responses follow the MCP response format
 
 ## Changelog
 
 ### v1.0.0
-- Initial release with basic story generation functionality
-- Added MCP server implementation
-- Added MCP client implementation
-- Added text analysis capabilities using spaCy
-- Added LEPOR-based style evaluation
-- Added configurable LLM provider integration
-- Added configuration system with file and environment variable support
 
-## Contributing
+- Initial release with MCP server and client implementation
+- Story generation from beats with metadata support
+- Text analysis using spaCy
+- LEPOR-based style evaluation
+- Configurable LLM provider integration
+- Official Model Context Protocol (MCP) compliance
 
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+
 
 ## License
 

@@ -7,210 +7,166 @@ It provides a simple interface to interact with the MCP server.
 import json
 import logging
 import asyncio
-import aiohttp
-from typing import Any, Dict, List, Optional, Union, Callable
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Union, Callable, Awaitable
+
+# Import MCP SDK
+from mcp import (
+    MCPClient,
+    MCPRequest,
+    MCPResponse,
+    MCPError,
+    MCPCapability
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class MCPClient:
+class BeatsToProseMCPClient(MCPClient):
     """MCP Client implementation for Beats-to-Prose"""
     
-    def __init__(self, server_url: str = "http://localhost:8000"):
-        """Initialize the MCP client
+    def __init__(self, server_url: str = "http://localhost:8000", api_key: Optional[str] = None):
+        """
+        Initialize the MCP client
         
         Args:
             server_url: URL of the MCP server
+            api_key: API key for authentication
         """
-        self.server_url = server_url
-        self.session = None
-        self.capabilities = {}
-        self.initialized = False
-    
-    async def connect(self):
-        """Connect to the MCP server and initialize the connection"""
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
+        # Initialize the MCP client
+        super().__init__(
+            server_url=server_url,
+            api_key=api_key
+        )
         
+        # Store client capabilities
+        self.capabilities = {}
+    
+    async def connect(self) -> Dict[str, Any]:
+        """
+        Connect to the MCP server and initialize client capabilities
+        
+        Returns:
+            Dict containing server capabilities
+        """
         # Define client capabilities
         client_capabilities = {
-            "story_generation": {
-                "enabled": True,
-                "features": ["prose_generation", "metadata_analysis"]
-            },
-            "text_analysis": {
-                "enabled": True,
-                "features": ["entity_extraction", "sentiment_analysis"]
-            },
-            "style_evaluation": {
-                "enabled": True,
-                "features": ["lepor_evaluation", "style_feature_analysis"]
-            }
+            "story_generation": True,
+            "text_analysis": True,
+            "style_evaluation": True
         }
         
-        # Initialize MCP connection
-        try:
-            async with self.session.post(
-                f"{self.server_url}/mcp/initialize",
-                json={"capabilities": client_capabilities}
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    self.capabilities = result.get("server_capabilities", {})
-                    self.initialized = True
-                    logger.info("MCP connection initialized successfully")
-                    return True
-                else:
-                    logger.error(f"Failed to initialize MCP connection: {response.status}")
-                    return False
-        except Exception as e:
-            logger.error(f"Error connecting to MCP server: {str(e)}")
-            return False
-    
-    async def close(self):
-        """Close the MCP client connection"""
-        if self.session:
-            await self.session.close()
-            self.session = None
-            self.initialized = False
-            logger.info("MCP connection closed")
+        # Initialize connection
+        response = await self.initialize(client_capabilities)
+        
+        # Store server capabilities
+        self.capabilities = response.data.get("server_capabilities", {})
+        
+        return self.capabilities
     
     async def generate_story(
         self, 
         beats: List[str], 
         metadata: Optional[Dict[str, Any]] = None,
         options: Optional[Dict[str, Any]] = None,
-        callback: Optional[Callable[[Dict[str, Any]], None]] = None
-    ) -> Dict[str, Any]:
-        """Generate a story from beats with optional metadata and analysis
+        callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
+    ) -> str:
+        """
+        Generate a story from beats with optional metadata and analysis
         
         Args:
             beats: List of story beats
-            metadata: Optional metadata for the story
+            metadata: Optional metadata for story generation
             options: Optional generation options
-            callback: Optional callback function to receive status updates
+            callback: Optional callback function for status updates
             
         Returns:
-            Dict containing the story generation result
+            Story ID for tracking generation progress
         """
-        if not self.initialized:
-            await self.connect()
+        # Check if story generation is enabled
+        if not self.capabilities.get("story_generation", {}).get("enabled", False):
+            raise MCPError(
+                code="FEATURE_DISABLED",
+                message="Story generation is not enabled on the server"
+            )
         
-        if not self.session:
-            raise Exception("MCP client not connected")
-        
-        # Prepare request
-        request = {
+        # Prepare request data
+        data = {
             "beats": beats,
             "metadata": metadata or {},
             "options": options or {}
         }
         
         # Send request
-        try:
-            async with self.session.post(
-                f"{self.server_url}/mcp/story/generate",
-                json=request
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    story_id = result.get("id")
-                    
-                    if not story_id:
-                        raise Exception("No story ID returned from server")
-                    
-                    # Poll for status updates
-                    while True:
-                        status = await self.get_story_status(story_id)
-                        
-                        # Call callback if provided
-                        if callback:
-                            callback(status)
-                        
-                        # Check if generation is complete
-                        if status.get("status") in ["completed", "failed"]:
-                            break
-                        
-                        # Wait before polling again
-                        await asyncio.sleep(1)
-                    
-                    return status
-                else:
-                    logger.error(f"Failed to generate story: {response.status}")
-                    return {"status": "failed", "error": f"Server returned status code {response.status}"}
-        except Exception as e:
-            logger.error(f"Error generating story: {str(e)}")
-            return {"status": "failed", "error": str(e)}
+        response = await self.request(
+            endpoint="/story/generate",
+            method="POST",
+            data=data
+        )
+        
+        # Extract story ID
+        story_id = response.data.get("id")
+        
+        # Start polling for status updates if callback is provided
+        if callback and story_id:
+            asyncio.create_task(self._poll_story_status(story_id, callback))
+        
+        return story_id
     
     async def get_story_status(self, story_id: str) -> Dict[str, Any]:
-        """Get the status of a story generation
+        """
+        Get the status of a story generation
         
         Args:
-            story_id: ID of the story generation
+            story_id: ID of the story to check
             
         Returns:
-            Dict containing the story generation status
+            Dict containing story status
         """
-        if not self.initialized:
-            await self.connect()
+        # Send request
+        response = await self.request(
+            endpoint=f"/story/{story_id}",
+            method="GET"
+        )
         
-        if not self.session:
-            raise Exception("MCP client not connected")
-        
-        try:
-            async with self.session.get(
-                f"{self.server_url}/mcp/story/{story_id}"
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    logger.error(f"Failed to get story status: {response.status}")
-                    return {"status": "failed", "error": f"Server returned status code {response.status}"}
-        except Exception as e:
-            logger.error(f"Error getting story status: {str(e)}")
-            return {"status": "failed", "error": str(e)}
+        return response.data
     
     async def analyze_text(
         self, 
         text: str, 
         options: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Analyze text using available tools
+        """
+        Analyze text using available tools
         
         Args:
             text: Text to analyze
             options: Optional analysis options
             
         Returns:
-            Dict containing the analysis results
+            Dict containing analysis results
         """
-        if not self.initialized:
-            await self.connect()
+        # Check if text analysis is enabled
+        if not self.capabilities.get("text_analysis", {}).get("enabled", False):
+            raise MCPError(
+                code="FEATURE_DISABLED",
+                message="Text analysis is not enabled on the server"
+            )
         
-        if not self.session:
-            raise Exception("MCP client not connected")
-        
-        # Prepare request
-        request = {
+        # Prepare request data
+        data = {
             "text": text,
             "options": options or {}
         }
         
-        try:
-            async with self.session.post(
-                f"{self.server_url}/mcp/text/analyze",
-                json=request
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    logger.error(f"Failed to analyze text: {response.status}")
-                    return {"status": "failed", "error": f"Server returned status code {response.status}"}
-        except Exception as e:
-            logger.error(f"Error analyzing text: {str(e)}")
-            return {"status": "failed", "error": str(e)}
+        # Send request
+        response = await self.request(
+            endpoint="/text/analyze",
+            method="POST",
+            data=data
+        )
+        
+        return response.data
     
     async def evaluate_style(
         self, 
@@ -218,149 +174,129 @@ class MCPClient:
         style_reference: str,
         options: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Evaluate generated text against a style reference using LEPOR
+        """
+        Evaluate generated text against a style reference
         
         Args:
-            generated_text: Generated text to evaluate
+            generated_text: Text to evaluate
             style_reference: Reference style text
             options: Optional evaluation options
             
         Returns:
-            Dict containing the evaluation results
+            Dict containing evaluation results
         """
-        if not self.initialized:
-            await self.connect()
+        # Check if style evaluation is enabled
+        if not self.capabilities.get("style_evaluation", {}).get("enabled", False):
+            raise MCPError(
+                code="FEATURE_DISABLED",
+                message="Style evaluation is not enabled on the server"
+            )
         
-        if not self.session:
-            raise Exception("MCP client not connected")
-        
-        # Prepare request
-        request = {
+        # Prepare request data
+        data = {
             "generated_text": generated_text,
             "style_reference": style_reference,
             "options": options or {}
         }
         
-        try:
-            async with self.session.post(
-                f"{self.server_url}/mcp/style/evaluate",
-                json=request
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    logger.error(f"Failed to evaluate style: {response.status}")
-                    return {"status": "failed", "error": f"Server returned status code {response.status}"}
-        except Exception as e:
-            logger.error(f"Error evaluating style: {str(e)}")
-            return {"status": "failed", "error": str(e)}
+        # Send request
+        response = await self.request(
+            endpoint="/style/evaluate",
+            method="POST",
+            data=data
+        )
+        
+        return response.data
     
-    async def health_check(self) -> Dict[str, Any]:
-        """Check the health of the MCP server
-        
-        Returns:
-            Dict containing the health check result
+    async def _poll_story_status(
+        self, 
+        story_id: str, 
+        callback: Callable[[Dict[str, Any]], Awaitable[None]],
+        interval: float = 1.0
+    ):
         """
-        if not self.initialized:
-            await self.connect()
+        Poll for story status updates
         
-        if not self.session:
-            raise Exception("MCP client not connected")
-        
+        Args:
+            story_id: ID of the story to poll
+            callback: Callback function for status updates
+            interval: Polling interval in seconds
+        """
         try:
-            async with self.session.get(
-                f"{self.server_url}/mcp/health"
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    logger.error(f"Health check failed: {response.status}")
-                    return {"status": "unhealthy", "error": f"Server returned status code {response.status}"}
+            while True:
+                # Get story status
+                status = await self.get_story_status(story_id)
+                
+                # Call callback function
+                await callback(status)
+                
+                # Check if generation is complete
+                if status.get("status") in ["completed", "failed"]:
+                    break
+                
+                # Wait before polling again
+                await asyncio.sleep(interval)
         except Exception as e:
-            logger.error(f"Error checking health: {str(e)}")
-            return {"status": "unhealthy", "error": str(e)}
+            logger.error(f"Error polling story status: {str(e)}")
 
 # Example usage
 async def main():
-    """Example usage of the MCP client"""
-    client = MCPClient()
+    # Initialize client
+    client = BeatsToProseMCPClient(
+        server_url="http://localhost:8000",
+        api_key="your_api_key"  # Replace with your API key
+    )
     
-    try:
-        # Connect to the server
-        if await client.connect():
-            logger.info("Connected to MCP server")
-            
-            # Check server health
-            health = await client.health_check()
-            logger.info(f"Server health: {health}")
-            
-            # Generate a story
-            beats = [
-                "A young wizard discovers they have magical powers",
-                "They are invited to a magical school",
-                "They face a dark force threatening the magical world"
-            ]
-            
-            metadata = {
-                "characters": [
-                    {
-                        "name": "Alex",
-                        "role": "protagonist",
-                        "description": "A young person discovering their magical abilities"
-                    }
-                ],
-                "setting": {
-                    "location": "Magical world",
-                    "time_period": "Present day",
-                    "atmosphere": "Mysterious and enchanting"
-                },
-                "genre": "Fantasy",
-                "style": "Young adult"
-            }
-            
-            options = {
-                "use_rag": True,
-                "use_spacy": True
-            }
-            
-            # Define a callback function to receive status updates
-            def status_callback(status):
-                logger.info(f"Story generation status: {status.get('status')} - Progress: {status.get('progress', 0)}")
-            
-            # Generate the story
-            result = await client.generate_story(beats, metadata, options, status_callback)
-            
-            # Check the result
-            if result.get("status") == "completed":
-                logger.info("Story generation completed successfully")
-                story_result = result.get("result", {})
-                prose = story_result.get("prose", "")
-                logger.info(f"Generated prose ({len(prose.split())} words):")
-                logger.info(prose[:500] + "..." if len(prose) > 500 else prose)
-                
-                # Evaluate the style
-                style_reference = """
-                The ancient castle stood atop the misty mountain, its weathered stones telling tales of centuries past. 
-                Within its walls, young apprentices practiced their craft, their eyes alight with wonder and determination. 
-                The air was thick with the scent of old books and the crackle of magical energy, as if the very fabric of reality 
-                bent to the will of those who knew its secrets.
-                """
-                
-                style_evaluation = await client.evaluate_style(prose, style_reference)
-                logger.info("Style evaluation results:")
-                logger.info(json.dumps(style_evaluation, indent=2))
-            else:
-                logger.error(f"Story generation failed: {result.get('error')}")
-            
-            # Analyze some text
-            text = "The magical school stood atop a misty mountain, its ancient spires reaching toward the clouds."
-            analysis = await client.analyze_text(text, {"use_spacy": True})
-            logger.info(f"Text analysis: {json.dumps(analysis, indent=2)}")
-        
-    finally:
-        # Close the connection
-        await client.close()
+    # Connect to server
+    capabilities = await client.connect()
+    logger.info(f"Connected to server with capabilities: {capabilities}")
+    
+    # Generate a story
+    beats = [
+        "A young wizard discovers his magical powers",
+        "He must face a dark wizard who threatens his school"
+    ]
+    
+    metadata = {
+        "genre": "fantasy",
+        "target_audience": "young adult",
+        "tone": "adventurous"
+    }
+    
+    # Define status callback
+    async def status_callback(status):
+        logger.info(f"Story status: {status.get('status')}, Progress: {status.get('progress', 0)}")
+    
+    # Start story generation
+    story_id = await client.generate_story(beats, metadata, callback=status_callback)
+    logger.info(f"Started story generation with ID: {story_id}")
+    
+    # Wait for generation to complete
+    while True:
+        status = await client.get_story_status(story_id)
+        if status.get("status") in ["completed", "failed"]:
+            break
+        await asyncio.sleep(1)
+    
+    # Check result
+    if status.get("status") == "completed":
+        result = status.get("result", {})
+        logger.info(f"Story generated successfully: {result.get('prose', '')[:100]}...")
+    else:
+        logger.error(f"Story generation failed: {status.get('error')}")
+    
+    # Analyze text
+    analysis = await client.analyze_text("The young wizard cast a spell.")
+    logger.info(f"Text analysis: {analysis}")
+    
+    # Evaluate style
+    style_reference = "The old wizard's eyes twinkled with ancient wisdom."
+    evaluation = await client.evaluate_style(
+        "The young wizard's eyes sparkled with newfound power.",
+        style_reference
+    )
+    logger.info(f"Style evaluation: {evaluation}")
 
-# Run the example if this file is executed directly
+# Run the example
 if __name__ == "__main__":
     asyncio.run(main()) 
